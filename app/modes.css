@@ -8,6 +8,7 @@
 .hint { font-size:12px!important; }
 .verdict { margin-top:9px; }
 .roomHead small { display:block; color:#938b82; margin-top:5px; }
+.roomActions{display:grid;justify-items:end;gap:7px}.roomActions button{border:1px solid #4b4540;background:#211f1d;color:#c9c0b6;border-radius:9px;padding:8px 10px;font-size:12px!important;cursor:pointer}
 .wikiLink { margin-left:auto; color:#d8bd84; font-size:12px; letter-spacing:0; text-decoration:none; }
 .portrait { background-image:url('/characters/trouble-brewing-atlas.png'); background-size:600% 400%; background-repeat:no-repeat; border-radius:14px; flex:0 0 auto; }
 .rolePortrait { width:180px; height:180px; margin:0 auto 18px; box-shadow:0 0 0 1px #8f7447,0 18px 35px #0008; }
