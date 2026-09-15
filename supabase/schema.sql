@@ -344,6 +344,7 @@ revoke all on function public.record_game_start(uuid) from public;
 revoke all on function public.restart_game(uuid) from public;
 revoke all on function public.add_test_bots(uuid) from public;
 grant execute on function public.shorten_auto_phase(uuid),public.advance_auto_phase(uuid),public.start_nomination(uuid,uuid),public.cast_nomination_vote(uuid,boolean),public.resolve_nomination(uuid),public.submit_night_action(uuid,uuid),public.record_game_start(uuid),public.restart_game(uuid),public.add_test_bots(uuid) to authenticated;
+revoke execute on function public.advance_auto_phase(uuid),public.submit_night_action(uuid,uuid),public.record_game_start(uuid) from anon;
 do $$ begin
   if not exists(select 1 from pg_publication_tables where pubname='supabase_realtime' and schemaname='public' and tablename='rooms') then alter publication supabase_realtime add table public.rooms; end if;
   if not exists(select 1 from pg_publication_tables where pubname='supabase_realtime' and schemaname='public' and tablename='players') then alter publication supabase_realtime add table public.players; end if;
