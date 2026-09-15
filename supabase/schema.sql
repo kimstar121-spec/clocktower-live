@@ -13,15 +13,20 @@ alter table public.actions add column if not exists created_at timestamptz not n
 create unique index if not exists players_room_user_key on public.players(room_id,user_id);
 create unique index if not exists actions_room_player_day_key on public.actions(room_id,actor_player_id,day_number);
 alter table public.rooms enable row level security; alter table public.players enable row level security; alter table public.actions enable row level security; alter table public.game_events enable row level security;
-drop policy if exists "rooms read" on public.rooms; create policy "rooms read" on public.rooms for select to authenticated using(true);
-drop policy if exists "rooms create" on public.rooms; create policy "rooms create" on public.rooms for insert to authenticated with check(host_id=(select auth.uid()));
-drop policy if exists "host updates room" on public.rooms; create policy "host updates room" on public.rooms for update to authenticated using(host_id=(select auth.uid())) with check(host_id=(select auth.uid()));
-drop policy if exists "players read room" on public.players; create policy "players read room" on public.players for select to authenticated using(true);
-drop policy if exists "players join" on public.players; create policy "players join" on public.players for insert to authenticated with check(user_id=(select auth.uid()));
-drop policy if exists "players update" on public.players; create policy "players update" on public.players for update to authenticated using(user_id=(select auth.uid()) or exists(select 1 from public.rooms r where r.id=room_id and r.host_id=(select auth.uid()))) with check(user_id=(select auth.uid()) or exists(select 1 from public.rooms r where r.id=room_id and r.host_id=(select auth.uid())));
-drop policy if exists "actions read" on public.actions; create policy "actions read" on public.actions for select to authenticated using(user_id=(select auth.uid()) or exists(select 1 from public.rooms r where r.id=room_id and r.host_id=(select auth.uid())));
-drop policy if exists "actions write" on public.actions; create policy "actions write" on public.actions for insert to authenticated with check(user_id=(select auth.uid()));
-drop policy if exists "actions change" on public.actions; create policy "actions change" on public.actions for update to authenticated using(user_id=(select auth.uid())) with check(user_id=(select auth.uid()));
+do $$ declare p record; begin
+  for p in select tablename,policyname from pg_policies where schemaname='public' and tablename in ('rooms','players','actions') loop
+    execute format('drop policy if exists %I on public.%I',p.policyname,p.tablename);
+  end loop;
+end $$;
+create policy "rooms read" on public.rooms for select to authenticated using(true);
+create policy "rooms create" on public.rooms for insert to authenticated with check(host_id=(select auth.uid()));
+create policy "host updates room" on public.rooms for update to authenticated using(host_id=(select auth.uid())) with check(host_id=(select auth.uid()));
+create policy "players read room" on public.players for select to authenticated using(true);
+create policy "players join" on public.players for insert to authenticated with check(user_id=(select auth.uid()));
+create policy "players update" on public.players for update to authenticated using(user_id=(select auth.uid()) or exists(select 1 from public.rooms r where r.id=room_id and r.host_id=(select auth.uid()))) with check(user_id=(select auth.uid()) or exists(select 1 from public.rooms r where r.id=room_id and r.host_id=(select auth.uid())));
+create policy "actions read" on public.actions for select to authenticated using(user_id=(select auth.uid()) or exists(select 1 from public.rooms r where r.id=room_id and r.host_id=(select auth.uid())));
+create policy "actions write" on public.actions for insert to authenticated with check(user_id=(select auth.uid()));
+create policy "actions change" on public.actions for update to authenticated using(user_id=(select auth.uid())) with check(user_id=(select auth.uid()));
 grant select,insert,update on public.rooms,public.players,public.actions to authenticated;
 create or replace view public.room_players with (security_invoker=true) as
 select p.id,p.room_id,p.user_id,p.nickname as name,
