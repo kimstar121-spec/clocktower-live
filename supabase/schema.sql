@@ -57,9 +57,15 @@ alter table public.actions add column if not exists action_type text;
 alter table public.actions add column if not exists target_id uuid;
 alter table public.actions add column if not exists submitted boolean not null default false;
 alter table public.actions add column if not exists created_at timestamptz not null default now();
+alter table public.actions add column if not exists result_text text;
+alter table public.nomination_votes add column if not exists vote_choice boolean not null default true;
+create table if not exists public.game_logs(
+  id bigint generated always as identity primary key, room_id uuid not null references public.rooms(id) on delete cascade,
+  day_number int not null, phase text not null, event_type text not null, message text not null, created_at timestamptz not null default now()
+);
 create unique index if not exists players_room_user_key on public.players(room_id,user_id);
 create unique index if not exists actions_room_player_day_key on public.actions(room_id,actor_player_id,day_number);
-alter table public.rooms enable row level security; alter table public.players enable row level security; alter table public.actions enable row level security; alter table public.game_events enable row level security; alter table public.player_notes enable row level security; alter table public.timer_shortens enable row level security; alter table public.nominations enable row level security; alter table public.nomination_votes enable row level security;
+alter table public.rooms enable row level security; alter table public.players enable row level security; alter table public.actions enable row level security; alter table public.game_events enable row level security; alter table public.player_notes enable row level security; alter table public.timer_shortens enable row level security; alter table public.nominations enable row level security; alter table public.nomination_votes enable row level security; alter table public.game_logs enable row level security;
 do $$ declare p record; begin
   for p in select tablename,policyname from pg_policies where schemaname='public' and tablename in ('rooms','players','actions') loop
     execute format('drop policy if exists %I on public.%I',p.policyname,p.tablename);
@@ -86,8 +92,11 @@ drop policy if exists "room nominations read" on public.nominations;
 drop policy if exists "room votes read" on public.nomination_votes;
 create policy "room nominations read" on public.nominations for select to authenticated using(exists(select 1 from public.players p where p.room_id=nominations.room_id and p.user_id=(select auth.uid())));
 create policy "room votes read" on public.nomination_votes for select to authenticated using(exists(select 1 from public.nominations n join public.players p on p.room_id=n.room_id where n.id=nomination_votes.nomination_id and p.user_id=(select auth.uid())));
+drop policy if exists "room logs read" on public.game_logs;
+create policy "room logs read" on public.game_logs for select to authenticated using(exists(select 1 from public.players p where p.room_id=game_logs.room_id and p.user_id=(select auth.uid())));
 grant select,insert,update on public.rooms,public.players,public.actions,public.player_notes,public.timer_shortens to authenticated;
 grant select on public.nominations,public.nomination_votes to authenticated;
+grant select on public.game_logs to authenticated;
 drop view if exists public.room_players;
 create view public.room_players with (security_invoker=true) as
 select p.id,p.room_id,p.user_id,p.nickname as name,
@@ -126,6 +135,7 @@ begin
       and not exists(select 1 from public.actions monk where monk.room_id=p_room_id and monk.day_number=v_room.day_number and monk.phase='night' and monk.action_type='수도사' and monk.target_id=imp.target_id)
     ) and victim.alive returning victim.nickname into v_dead_names;
     select count(*) into v_count from public.players where room_id=p_room_id and alive and not is_storyteller;
+    insert into public.game_logs(room_id,day_number,phase,event_type,message) values(p_room_id,v_room.day_number,'night',case when v_dead_names is null then 'no_death' else 'death' end,case when v_dead_names is null then '밤사이 아무 일도 일어나지 않았습니다.' else v_dead_names||' 님이 밤에 사망했습니다.' end);
     if not exists(select 1 from public.players where room_id=p_room_id and alive and role='임프') then
       update public.rooms set status='finished',winner='good',ended_at=now(),phase_ends_at=null,dawn_message='악마가 사망했습니다. 선량 팀이 승리했습니다.' where id=p_room_id;
     elsif v_count<=2 then
@@ -140,7 +150,11 @@ begin
     if v_target is not null then
       select role='성자' into v_saint from public.players where id=v_target;
       update public.players set alive=false where id=v_target and alive;
-    else v_saint:=false; end if;
+      insert into public.game_logs(room_id,day_number,phase,event_type,message) select p_room_id,v_room.day_number,'day','execution',nickname||' 님이 처형되었습니다.' from public.players where id=v_target;
+    else
+      insert into public.game_logs(room_id,day_number,phase,event_type,message) values(p_room_id,v_room.day_number,'day','no_execution','오늘은 아무도 처형되지 않았습니다.');
+      v_saint:=false;
+    end if;
     select count(*) into v_count from public.players where room_id=p_room_id and alive and not is_storyteller;
     select exists(select 1 from public.players where room_id=p_room_id and alive and role='시장') into v_mayor;
     if v_saint then
@@ -153,6 +167,7 @@ begin
       update public.rooms set status='finished',winner='good',ended_at=now(),phase_ends_at=null,dawn_message='3명이 생존한 채 처형 없이 낮이 끝나 시장의 능력으로 선량 팀이 승리했습니다.' where id=p_room_id; return;
     end if;
     v_next_day:=v_room.day_number+1;
+    insert into public.game_logs(room_id,day_number,phase,event_type,message) values(p_room_id,v_next_day,'night','phase','다음 밤이 시작되었습니다.');
     update public.rooms set status='night',day_number=v_next_day,phase_ends_at=now()+make_interval(secs=>v_count*30),dawn_message=null,current_nomination_id=null,execution_candidate_id=null,execution_candidate_votes=0,execution_tied=false where id=p_room_id;
   end if;
 end $$;
@@ -172,7 +187,8 @@ begin
 exception when unique_violation then raise exception '오늘 이미 고발했거나, 대상이 이미 고발당했습니다.';
 end $$;
 
-create or replace function public.cast_nomination_vote(p_nomination_id uuid)
+drop function if exists public.cast_nomination_vote(uuid);
+create or replace function public.cast_nomination_vote(p_nomination_id uuid,p_vote boolean)
 returns void language plpgsql security definer set search_path='' as $$
 declare v_nom public.nominations%rowtype; v_voter public.players%rowtype;
 begin
@@ -181,8 +197,8 @@ begin
   if v_nom.id is null or v_nom.status<>'voting' or v_nom.ends_at<=now() then raise exception '투표가 종료되었습니다.'; end if;
   if v_voter.id is null or v_voter.is_storyteller then raise exception '플레이어만 투표할 수 있습니다.'; end if;
   if not v_voter.alive and v_voter.ghost_vote_used then raise exception '유령 표를 이미 사용했습니다.'; end if;
-  insert into public.nomination_votes(nomination_id,voter_player_id,user_id) values(v_nom.id,v_voter.id,(select auth.uid()));
-  if not v_voter.alive then update public.players set ghost_vote_used=true where id=v_voter.id; end if;
+  insert into public.nomination_votes(nomination_id,voter_player_id,user_id,vote_choice) values(v_nom.id,v_voter.id,(select auth.uid()),p_vote);
+  if p_vote and not v_voter.alive then update public.players set ghost_vote_used=true where id=v_voter.id; end if;
 exception when unique_violation then raise exception '이번 재판에 이미 투표했습니다.';
 end $$;
 
@@ -195,7 +211,7 @@ begin
   if v_room.current_nomination_id is null then return; end if;
   select * into v_nom from public.nominations where id=v_room.current_nomination_id for update;
   if v_nom.ends_at>now() then return; end if;
-  select count(*) into v_votes from public.nomination_votes where nomination_id=v_nom.id;
+  select count(*) into v_votes from public.nomination_votes where nomination_id=v_nom.id and vote_choice;
   select count(*) into v_alive from public.players where room_id=p_room_id and alive and not is_storyteller;
   v_threshold:=(v_alive+1)/2;
   update public.nominations set status='closed',votes_count=v_votes where id=v_nom.id;
@@ -208,12 +224,59 @@ begin
   end if;
   update public.rooms set current_nomination_id=null where id=p_room_id;
 end $$;
+
+create or replace function public.submit_night_action(p_room_id uuid,p_target_id uuid default null)
+returns text language plpgsql security definer set search_path='' as $$
+declare v_room public.rooms%rowtype; v_actor public.players%rowtype; v_result text; v_evil int; v_left text; v_right text;
+begin
+  select * into v_room from public.rooms where id=p_room_id;
+  select * into v_actor from public.players where room_id=p_room_id and user_id=(select auth.uid());
+  if v_room.status<>'night' or v_actor.id is null or not v_actor.alive or v_actor.is_storyteller then raise exception '현재 밤 행동을 할 수 없습니다.'; end if;
+  if v_actor.role='초공감자' then
+    select nickname into v_left from public.players where room_id=p_room_id and alive and not is_storyteller and id<>v_actor.id order by ((seat_number-v_actor.seat_number+1000)%1000) desc limit 1;
+    select nickname into v_right from public.players where room_id=p_room_id and alive and not is_storyteller and id<>v_actor.id order by ((seat_number-v_actor.seat_number+1000)%1000) asc limit 1;
+    select count(*) into v_evil from public.players where room_id=p_room_id and alive and nickname in (v_left,v_right) and role in ('독살범','첩자','남작','탕녀','임프');
+    v_result:='양옆 생존자('||coalesce(v_left,'없음')||', '||coalesce(v_right,'없음')||') 중 악한 플레이어는 '||v_evil||'명입니다.';
+  elsif v_actor.role='요리사' then
+    with ordered as (select role,lead(role) over(order by seat_number) nxt,first_value(role) over(order by seat_number) first_role,row_number() over(order by seat_number desc) rn from public.players where room_id=p_room_id and not is_storyteller)
+    select count(*) into v_evil from ordered where role in ('독살범','첩자','남작','탕녀','임프') and (case when rn=1 then first_role else nxt end) in ('독살범','첩자','남작','탕녀','임프');
+    v_result:='서로 이웃한 악한 플레이어 쌍은 '||v_evil||'쌍입니다.';
+  else
+    v_result:=case when v_actor.role in ('세탁부','사서','수사관','점쟁이','장의사','까마귀지기') then '선택이 기록되었습니다. 판정 가능한 정보는 이어지는 자동 안내에서 확인하세요.' else '밤 행동이 기록되었습니다.' end;
+  end if;
+  insert into public.actions(room_id,actor_player_id,user_id,day_number,phase,action_type,target_id,submitted,result_text)
+  values(p_room_id,v_actor.id,(select auth.uid()),v_room.day_number,'night',v_actor.role,p_target_id,true,v_result)
+  on conflict(room_id,actor_player_id,day_number) do update set target_id=excluded.target_id,submitted=true,result_text=excluded.result_text;
+  return v_result;
+end $$;
+
+create or replace function public.record_game_start(p_room_id uuid)
+returns void language plpgsql security definer set search_path='' as $$ begin
+  if not exists(select 1 from public.rooms where id=p_room_id and host_id=(select auth.uid())) then raise exception '방장만 시작할 수 있습니다.'; end if;
+  delete from public.game_logs where room_id=p_room_id;
+  insert into public.game_logs(room_id,day_number,phase,event_type,message) values(p_room_id,1,'night','phase','첫째 밤이 시작되었습니다.');
+end $$;
+
+create or replace function public.restart_game(p_room_id uuid)
+returns void language plpgsql security definer set search_path='' as $$
+declare v_mode text;
+begin
+  select game_mode into v_mode from public.rooms where id=p_room_id and host_id=(select auth.uid()) for update;
+  if v_mode is null then raise exception '방장만 다시 시작할 수 있습니다.'; end if;
+  delete from public.nomination_votes where nomination_id in(select id from public.nominations where room_id=p_room_id);
+  delete from public.nominations where room_id=p_room_id; delete from public.actions where room_id=p_room_id; delete from public.timer_shortens where room_id=p_room_id; delete from public.game_logs where room_id=p_room_id;
+  update public.players set role=null,alive=true,ghost_vote_used=false,is_storyteller=(v_mode='storyteller' and user_id=(select host_id from public.rooms where id=p_room_id)) where room_id=p_room_id;
+  update public.rooms set status='lobby',day_number=1,winner=null,ended_at=null,phase_ends_at=null,dawn_message=null,current_nomination_id=null,execution_candidate_id=null,execution_candidate_votes=0,execution_tied=false,nomination_target_id=null where id=p_room_id;
+end $$;
 revoke all on function public.shorten_auto_phase(uuid) from public;
 revoke all on function public.advance_auto_phase(uuid) from public;
 revoke all on function public.start_nomination(uuid,uuid) from public;
-revoke all on function public.cast_nomination_vote(uuid) from public;
+revoke all on function public.cast_nomination_vote(uuid,boolean) from public;
 revoke all on function public.resolve_nomination(uuid) from public;
-grant execute on function public.shorten_auto_phase(uuid),public.advance_auto_phase(uuid),public.start_nomination(uuid,uuid),public.cast_nomination_vote(uuid),public.resolve_nomination(uuid) to authenticated;
+revoke all on function public.submit_night_action(uuid,uuid) from public;
+revoke all on function public.record_game_start(uuid) from public;
+revoke all on function public.restart_game(uuid) from public;
+grant execute on function public.shorten_auto_phase(uuid),public.advance_auto_phase(uuid),public.start_nomination(uuid,uuid),public.cast_nomination_vote(uuid,boolean),public.resolve_nomination(uuid),public.submit_night_action(uuid,uuid),public.record_game_start(uuid),public.restart_game(uuid) to authenticated;
 do $$ begin
   if not exists(select 1 from pg_publication_tables where pubname='supabase_realtime' and schemaname='public' and tablename='rooms') then alter publication supabase_realtime add table public.rooms; end if;
   if not exists(select 1 from pg_publication_tables where pubname='supabase_realtime' and schemaname='public' and tablename='players') then alter publication supabase_realtime add table public.players; end if;
