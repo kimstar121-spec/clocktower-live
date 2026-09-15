@@ -24,4 +24,14 @@ drop policy if exists "actions read" on public.actions; create policy "actions r
 drop policy if exists "actions write" on public.actions; create policy "actions write" on public.actions for insert to authenticated with check(user_id=(select auth.uid()));
 drop policy if exists "actions change" on public.actions; create policy "actions change" on public.actions for update to authenticated using(user_id=(select auth.uid())) with check(user_id=(select auth.uid()));
 grant select,insert,update on public.rooms,public.players,public.actions to authenticated;
-alter publication supabase_realtime add table public.rooms,public.players,public.actions;
+create or replace view public.room_players with (security_invoker=true) as
+select p.id,p.room_id,p.user_id,p.name,
+  case when p.user_id=(select auth.uid()) or exists(select 1 from public.rooms r where r.id=p.room_id and r.host_id=(select auth.uid())) then p.role else null end as role,
+  p.alive,p.seat
+from public.players p;
+grant select on public.room_players to authenticated;
+do $$ begin
+  if not exists(select 1 from pg_publication_tables where pubname='supabase_realtime' and schemaname='public' and tablename='rooms') then alter publication supabase_realtime add table public.rooms; end if;
+  if not exists(select 1 from pg_publication_tables where pubname='supabase_realtime' and schemaname='public' and tablename='players') then alter publication supabase_realtime add table public.players; end if;
+  if not exists(select 1 from pg_publication_tables where pubname='supabase_realtime' and schemaname='public' and tablename='actions') then alter publication supabase_realtime add table public.actions; end if;
+end $$;
