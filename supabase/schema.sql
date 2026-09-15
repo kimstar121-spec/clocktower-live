@@ -11,6 +11,7 @@ alter table public.rooms add column if not exists execution_candidate_id uuid;
 alter table public.rooms add column if not exists execution_candidate_votes int not null default 0;
 alter table public.rooms add column if not exists execution_tied boolean not null default false;
 alter table public.rooms add column if not exists night_ready_at timestamptz;
+alter table public.rooms add column if not exists last_executed_player_id uuid;
 alter table public.rooms drop constraint if exists rooms_code_check;
 alter table public.rooms add constraint rooms_code_check check(code ~ '^[0-9]{4}$') not valid;
 alter table public.rooms drop constraint if exists rooms_status_check;
@@ -124,12 +125,13 @@ end $$;
 
 create or replace function public.advance_auto_phase(p_room_id uuid)
 returns void language plpgsql security definer set search_path='' as $$
-declare v_room public.rooms%rowtype; v_count int; v_required int; v_done int; v_dead_names text; v_next_day int; v_target uuid; v_saint boolean; v_mayor boolean;
+declare v_room public.rooms%rowtype; v_count int; v_humans int; v_before int; v_required int; v_done int; v_dead_names text; v_next_day int; v_target uuid; v_saint boolean; v_mayor boolean; v_target_role text; v_successor text;
 begin
   if not exists(select 1 from public.players p where p.room_id=p_room_id and p.user_id=(select auth.uid()) and not p.is_storyteller) then raise exception '이 방의 플레이어만 진행할 수 있습니다.'; end if;
   select * into v_room from public.rooms where id=p_room_id for update;
   if v_room.game_mode<>'auto' or v_room.status not in ('day','night') then return; end if;
   select count(*) into v_count from public.players where room_id=p_room_id and alive and not is_storyteller;
+  v_before:=v_count;
   if v_room.status='night' then
     select count(*) into v_required from public.players where room_id=p_room_id and alive and not is_storyteller and role = any(case when v_room.day_number=1 then array['독살범','세탁부','사서','수사관','요리사','초공감자','점쟁이','집사','첩자'] else array['독살범','수도사','임프','초공감자','점쟁이','집사','첩자'] end);
     select count(distinct a.actor_player_id) into v_done from public.actions a join public.players p on p.id=a.actor_player_id where a.room_id=p_room_id and a.day_number=v_room.day_number and a.phase='night' and a.submitted and p.alive;
@@ -142,6 +144,10 @@ begin
       select imp.target_id from public.actions imp where imp.room_id=p_room_id and imp.day_number=v_room.day_number and imp.phase='night' and imp.action_type='임프' and imp.target_id is not null
       and not exists(select 1 from public.actions monk where monk.room_id=p_room_id and monk.day_number=v_room.day_number and monk.phase='night' and monk.action_type='수도사' and monk.target_id=imp.target_id)
     ) and victim.alive returning victim.nickname into v_dead_names;
+    if not exists(select 1 from public.players where room_id=p_room_id and alive and role='임프') and v_before>=5 then
+      update public.players set role='임프' where id=(select id from public.players where room_id=p_room_id and alive and role='탕녀' order by seat_number limit 1) returning nickname into v_successor;
+      if v_successor is not null then insert into public.game_logs(room_id,day_number,phase,event_type,message) values(p_room_id,v_room.day_number,'night','role_change',v_successor||' 님이 악마의 자리를 이어받았습니다.'); end if;
+    end if;
     select count(*) into v_count from public.players where room_id=p_room_id and alive and not is_storyteller;
     insert into public.game_logs(room_id,day_number,phase,event_type,message) values(p_room_id,v_room.day_number,'night',case when v_dead_names is null then 'no_death' else 'death' end,case when v_dead_names is null then '밤사이 아무 일도 일어나지 않았습니다.' else v_dead_names||' 님이 밤에 사망했습니다.' end);
     if not exists(select 1 from public.players where room_id=p_room_id and alive and role='임프') then
@@ -149,19 +155,26 @@ begin
     elsif v_count<=2 then
       update public.rooms set status='finished',winner='evil',ended_at=now(),phase_ends_at=null,night_ready_at=null,dawn_message='생존자가 2명이 되었습니다. 악 팀이 승리했습니다.' where id=p_room_id;
     else
-      update public.rooms set status='day',phase_ends_at=now()+make_interval(secs=>v_count*60),night_ready_at=null,dawn_message=case when v_dead_names is null then '밤사이 아무 일도 일어나지 않았습니다.' else '밤사이 '||v_dead_names||' 님이 사망했습니다.' end where id=p_room_id;
+      select count(*) into v_humans from public.players where room_id=p_room_id and alive and not is_storyteller and not is_ai;
+      update public.rooms set status='day',phase_ends_at=now()+make_interval(secs=>v_humans*60),night_ready_at=null,dawn_message=case when v_dead_names is null then '밤사이 아무 일도 일어나지 않았습니다.' else '밤사이 '||v_dead_names||' 님이 사망했습니다.' end where id=p_room_id;
     end if;
   else
     if v_room.current_nomination_id is not null then return; end if;
     if coalesce(v_room.phase_ends_at,now())>now() then return; end if;
     v_target:=case when not v_room.execution_tied then v_room.execution_candidate_id else null end;
     if v_target is not null then
-      select role='성자' into v_saint from public.players where id=v_target;
+      select role='성자',role into v_saint,v_target_role from public.players where id=v_target;
       update public.players set alive=false where id=v_target and alive;
+      update public.rooms set last_executed_player_id=v_target where id=p_room_id;
+      if v_target_role='임프' and v_before>=5 then
+        update public.players set role='임프' where id=(select id from public.players where room_id=p_room_id and alive and role='탕녀' order by seat_number limit 1) returning nickname into v_successor;
+        if v_successor is not null then insert into public.game_logs(room_id,day_number,phase,event_type,message) values(p_room_id,v_room.day_number,'day','role_change',v_successor||' 님이 악마의 자리를 이어받았습니다.'); end if;
+      end if;
       insert into public.game_logs(room_id,day_number,phase,event_type,message) select p_room_id,v_room.day_number,'day','execution',nickname||' 님이 처형되었습니다.' from public.players where id=v_target;
     else
       insert into public.game_logs(room_id,day_number,phase,event_type,message) values(p_room_id,v_room.day_number,'day','no_execution','오늘은 아무도 처형되지 않았습니다.');
       v_saint:=false;
+      update public.rooms set last_executed_player_id=null where id=p_room_id;
     end if;
     select count(*) into v_count from public.players where room_id=p_room_id and alive and not is_storyteller;
     select exists(select 1 from public.players where room_id=p_room_id and alive and role='시장') into v_mayor;
@@ -176,7 +189,8 @@ begin
     end if;
     v_next_day:=v_room.day_number+1;
     insert into public.game_logs(room_id,day_number,phase,event_type,message) values(p_room_id,v_next_day,'night','phase','다음 밤이 시작되었습니다.');
-    update public.rooms set status='night',day_number=v_next_day,phase_ends_at=now()+make_interval(secs=>v_count*30),night_ready_at=null,dawn_message=null,current_nomination_id=null,execution_candidate_id=null,execution_candidate_votes=0,execution_tied=false where id=p_room_id;
+    select count(*) into v_humans from public.players where room_id=p_room_id and alive and not is_storyteller and not is_ai;
+    update public.rooms set status='night',day_number=v_next_day,phase_ends_at=now()+make_interval(secs=>v_humans*30),night_ready_at=null,dawn_message=null,current_nomination_id=null,execution_candidate_id=null,execution_candidate_votes=0,execution_tied=false where id=p_room_id;
   end if;
 end $$;
 
@@ -245,7 +259,7 @@ end $$;
 
 create or replace function public.submit_night_action(p_room_id uuid,p_target_id uuid default null)
 returns text language plpgsql security definer set search_path='' as $$
-declare v_room public.rooms%rowtype; v_actor public.players%rowtype; v_result text; v_evil int; v_left text; v_right text;
+declare v_room public.rooms%rowtype; v_actor public.players%rowtype; v_result text; v_evil int; v_left text; v_right text; v_true text; v_false text; v_role text; v_book text;
 begin
   select * into v_room from public.rooms where id=p_room_id;
   select * into v_actor from public.players where room_id=p_room_id and user_id=(select auth.uid());
@@ -259,8 +273,28 @@ begin
     with ordered as (select role,lead(role) over(order by seat_number) nxt,first_value(role) over(order by seat_number) first_role,row_number() over(order by seat_number desc) rn from public.players where room_id=p_room_id and not is_storyteller)
     select count(*) into v_evil from ordered where role in ('독살범','첩자','남작','탕녀','임프') and (case when rn=1 then first_role else nxt end) in ('독살범','첩자','남작','탕녀','임프');
     v_result:='서로 이웃한 악한 플레이어 쌍은 '||v_evil||'쌍입니다.';
+  elsif v_actor.role in ('세탁부','사서','수사관') then
+    select nickname,role into v_true,v_role from public.players where room_id=p_room_id and not is_storyteller and role = any(case v_actor.role when '세탁부' then array['세탁부','사서','수사관','요리사','초공감자','점쟁이','장의사','수도사','까마귀지기','처녀','슬레이어','군인','시장'] when '사서' then array['집사','주정뱅이','은둔자','성자'] else array['독살범','첩자','남작','탕녀'] end) order by random() limit 1;
+    if v_true is null and v_actor.role='사서' then v_result:='이번 게임에는 외지인이 없습니다.';
+    elsif v_true is null then v_result:='확인할 수 있는 해당 역할이 없습니다.';
+    else
+      select nickname into v_false from public.players where room_id=p_room_id and not is_storyteller and nickname<>v_true order by random() limit 1;
+      v_result:=v_true||' 님과 '||coalesce(v_false,'다른 플레이어')||' 님 중 한 명은 '||v_role||'입니다.';
+    end if;
+  elsif v_actor.role='점쟁이' then
+    select role into v_role from public.players where id=p_target_id and room_id=p_room_id;
+    v_result:=case when v_role='임프' then '예 — 선택한 플레이어는 악마로 판정됩니다.' else '아니요 — 선택한 플레이어는 악마로 판정되지 않습니다.' end;
+  elsif v_actor.role='장의사' then
+    select p.nickname,p.role into v_true,v_role from public.rooms r left join public.players p on p.id=r.last_executed_player_id where r.id=p_room_id;
+    v_result:=case when v_true is null then '지난 낮에 처형된 플레이어가 없습니다.' else v_true||' 님의 역할은 '||v_role||'입니다.' end;
+  elsif v_actor.role='까마귀지기' then
+    select nickname,role into v_true,v_role from public.players where id=p_target_id and room_id=p_room_id;
+    v_result:=coalesce(v_true,'선택한 플레이어')||' 님의 역할은 '||coalesce(v_role,'확인 불가')||'입니다.';
+  elsif v_actor.role='첩자' then
+    select string_agg(nickname||' — '||coalesce(role,'미정'), E'\n' order by seat_number) into v_book from public.players where room_id=p_room_id and not is_storyteller;
+    v_result:='마도서\n'||coalesce(v_book,'표시할 플레이어가 없습니다.');
   else
-    v_result:=case when v_actor.role in ('세탁부','사서','수사관','점쟁이','장의사','까마귀지기') then '선택이 기록되었습니다. 판정 가능한 정보는 이어지는 자동 안내에서 확인하세요.' else '밤 행동이 기록되었습니다.' end;
+    v_result:='밤 행동이 기록되었습니다.';
   end if;
   insert into public.actions(room_id,actor_player_id,user_id,day_number,phase,action_type,target_id,submitted,result_text)
   values(p_room_id,v_actor.id,(select auth.uid()),v_room.day_number,'night',v_actor.role,p_target_id,true,v_result)
@@ -271,6 +305,7 @@ end $$;
 create or replace function public.record_game_start(p_room_id uuid)
 returns void language plpgsql security definer set search_path='' as $$ begin
   if not exists(select 1 from public.rooms where id=p_room_id and host_id=(select auth.uid())) then raise exception '방장만 시작할 수 있습니다.'; end if;
+  update public.rooms set phase_ends_at=now()+make_interval(secs=>30+30*(select count(*) from public.players where room_id=p_room_id and alive and not is_storyteller and not is_ai)) where id=p_room_id and game_mode='auto';
   delete from public.game_logs where room_id=p_room_id;
   insert into public.game_logs(room_id,day_number,phase,event_type,message) values(p_room_id,1,'night','phase','첫째 밤이 시작되었습니다.');
 end $$;
@@ -284,7 +319,7 @@ begin
   delete from public.nomination_votes where nomination_id in(select id from public.nominations where room_id=p_room_id);
   delete from public.nominations where room_id=p_room_id; delete from public.actions where room_id=p_room_id; delete from public.timer_shortens where room_id=p_room_id; delete from public.game_logs where room_id=p_room_id;
   update public.players set role=null,alive=true,ghost_vote_used=false,is_storyteller=(v_mode='storyteller' and user_id=(select host_id from public.rooms where id=p_room_id)) where room_id=p_room_id;
-  update public.rooms set status='lobby',day_number=1,winner=null,ended_at=null,phase_ends_at=null,dawn_message=null,current_nomination_id=null,execution_candidate_id=null,execution_candidate_votes=0,execution_tied=false,nomination_target_id=null where id=p_room_id;
+  update public.rooms set status='lobby',day_number=1,winner=null,ended_at=null,phase_ends_at=null,dawn_message=null,current_nomination_id=null,execution_candidate_id=null,execution_candidate_votes=0,execution_tied=false,nomination_target_id=null,last_executed_player_id=null where id=p_room_id;
 end $$;
 
 create or replace function public.add_test_bots(p_room_id uuid)
