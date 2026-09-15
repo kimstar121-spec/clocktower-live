@@ -1,9 +1,13 @@
 create extension if not exists pgcrypto;
 alter table public.rooms add column if not exists created_at timestamptz not null default now();
+alter table public.rooms add column if not exists game_mode text not null default 'storyteller';
+alter table public.rooms add column if not exists winner text;
+alter table public.rooms add column if not exists nomination_target_id uuid;
 alter table public.players add column if not exists user_id uuid;
 alter table public.players add column if not exists role text;
 alter table public.players add column if not exists alive boolean not null default true;
 alter table public.players add column if not exists created_at timestamptz not null default now();
+alter table public.players add column if not exists is_storyteller boolean not null default false;
 alter table public.actions add column if not exists user_id uuid;
 alter table public.actions add column if not exists day_number int not null default 1;
 alter table public.actions add column if not exists action_type text;
@@ -31,7 +35,7 @@ grant select,insert,update on public.rooms,public.players,public.actions to auth
 create or replace view public.room_players with (security_invoker=true) as
 select p.id,p.room_id,p.user_id,p.nickname as name,
   case when p.user_id=(select auth.uid()) or exists(select 1 from public.rooms r where r.id=p.room_id and r.host_id=(select auth.uid())) then p.role else null end as role,
-  p.alive,p.seat_number as seat
+  p.alive,p.seat_number as seat,p.is_storyteller
 from public.players p;
 grant select on public.room_players to authenticated;
 do $$ begin

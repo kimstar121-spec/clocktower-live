@@ -1,0 +1,10 @@
+.modePick { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.modePick button { padding:14px 10px; text-align:left; border:1px solid #403a36; border-radius:12px; background:#141312; color:#ddd; }
+.modePick button.selected { border-color:#d84b43; background:#341c1a; }
+.modePick b,.modePick small { display:block; }
+.modePick small { margin-top:5px; color:#918981; line-height:1.35; }
+.mini { border:1px solid #514943; background:#292522; color:#ddd; border-radius:8px; padding:7px 9px; }
+.dead { opacity:.55; text-decoration:line-through; }
+.hint { font-size:12px!important; }
+.verdict { margin-top:9px; }
+.roomHead small { display:block; color:#938b82; margin-top:5px; }
