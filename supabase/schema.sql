@@ -16,6 +16,7 @@ alter table public.rooms add constraint rooms_code_check check(code ~ '^[0-9]{4}
 alter table public.rooms drop constraint if exists rooms_status_check;
 alter table public.rooms add constraint rooms_status_check check(status in ('lobby','setup','day','night','ended','finished'));
 alter table public.players add column if not exists user_id uuid;
+alter table public.players alter column user_id drop not null;
 alter table public.players add column if not exists role text;
 alter table public.players add column if not exists alive boolean not null default true;
 alter table public.players add column if not exists created_at timestamptz not null default now();
