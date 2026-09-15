@@ -34,7 +34,7 @@ create policy "actions change" on public.actions for update to authenticated usi
 grant select,insert,update on public.rooms,public.players,public.actions to authenticated;
 create or replace view public.room_players with (security_invoker=true) as
 select p.id,p.room_id,p.user_id,p.nickname as name,
-  case when p.user_id=(select auth.uid()) or exists(select 1 from public.rooms r where r.id=p.room_id and r.host_id=(select auth.uid())) then p.role else null end as role,
+  case when p.user_id=(select auth.uid()) or exists(select 1 from public.rooms r where r.id=p.room_id and r.host_id=(select auth.uid()) and r.game_mode='storyteller') then p.role else null end as role,
   p.alive,p.seat_number as seat,p.is_storyteller
 from public.players p;
 grant select on public.room_players to authenticated;
