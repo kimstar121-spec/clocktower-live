@@ -10,6 +10,7 @@ alter table public.rooms add column if not exists current_nomination_id uuid;
 alter table public.rooms add column if not exists execution_candidate_id uuid;
 alter table public.rooms add column if not exists execution_candidate_votes int not null default 0;
 alter table public.rooms add column if not exists execution_tied boolean not null default false;
+alter table public.rooms add column if not exists night_ready_at timestamptz;
 alter table public.rooms drop constraint if exists rooms_code_check;
 alter table public.rooms add constraint rooms_code_check check(code ~ '^[0-9]{4}$') not valid;
 alter table public.rooms drop constraint if exists rooms_status_check;
@@ -23,6 +24,7 @@ alter table public.players add column if not exists position_x real;
 alter table public.players add column if not exists position_y real;
 alter table public.players add column if not exists rmk_role text;
 alter table public.players add column if not exists ghost_vote_used boolean not null default false;
+alter table public.players add column if not exists is_ai boolean not null default false;
 create table if not exists public.nominations(
   id uuid primary key default gen_random_uuid(), room_id uuid not null references public.rooms(id) on delete cascade,
   day_number int not null, nominator_player_id uuid not null references public.players(id), target_player_id uuid not null references public.players(id),
@@ -59,6 +61,7 @@ alter table public.actions add column if not exists submitted boolean not null d
 alter table public.actions add column if not exists created_at timestamptz not null default now();
 alter table public.actions add column if not exists result_text text;
 alter table public.nomination_votes add column if not exists vote_choice boolean not null default true;
+alter table public.nomination_votes alter column user_id drop not null;
 create table if not exists public.game_logs(
   id bigint generated always as identity primary key, room_id uuid not null references public.rooms(id) on delete cascade,
   day_number int not null, phase text not null, event_type text not null, message text not null, created_at timestamptz not null default now()
@@ -101,7 +104,7 @@ drop view if exists public.room_players;
 create view public.room_players with (security_invoker=true) as
 select p.id,p.room_id,p.user_id,p.nickname as name,
   case when p.user_id=(select auth.uid()) or exists(select 1 from public.rooms r where r.id=p.room_id and (r.status='finished' or (r.host_id=(select auth.uid()) and r.game_mode='storyteller'))) then p.role else null end as role,
-  p.alive,p.seat_number as seat,p.is_storyteller,p.ghost_vote_used
+  p.alive,p.seat_number as seat,p.is_storyteller,p.ghost_vote_used,p.is_ai
 from public.players p;
 grant select on public.room_players to authenticated;
 
@@ -129,7 +132,11 @@ begin
   if v_room.status='night' then
     select count(*) into v_required from public.players where room_id=p_room_id and alive and not is_storyteller and role = any(case when v_room.day_number=1 then array['독살범','세탁부','사서','수사관','요리사','초공감자','점쟁이','집사','첩자'] else array['독살범','수도사','임프','초공감자','점쟁이','집사','첩자'] end);
     select count(distinct a.actor_player_id) into v_done from public.actions a join public.players p on p.id=a.actor_player_id where a.room_id=p_room_id and a.day_number=v_room.day_number and a.phase='night' and a.submitted and p.alive;
-    if coalesce(v_room.phase_ends_at,now())>now() and (v_room.day_number=1 or v_done<v_required) then return; end if;
+    if coalesce(v_room.phase_ends_at,now())>now() then
+      if v_room.day_number=1 or v_done<v_required then update public.rooms set night_ready_at=null where id=p_room_id; return; end if;
+      if v_room.night_ready_at is null then update public.rooms set night_ready_at=now()+interval '3 seconds' where id=p_room_id; return; end if;
+      if v_room.night_ready_at>now() then return; end if;
+    end if;
     update public.players victim set alive=false where victim.id in (
       select imp.target_id from public.actions imp where imp.room_id=p_room_id and imp.day_number=v_room.day_number and imp.phase='night' and imp.action_type='임프' and imp.target_id is not null
       and not exists(select 1 from public.actions monk where monk.room_id=p_room_id and monk.day_number=v_room.day_number and monk.phase='night' and monk.action_type='수도사' and monk.target_id=imp.target_id)
@@ -137,11 +144,11 @@ begin
     select count(*) into v_count from public.players where room_id=p_room_id and alive and not is_storyteller;
     insert into public.game_logs(room_id,day_number,phase,event_type,message) values(p_room_id,v_room.day_number,'night',case when v_dead_names is null then 'no_death' else 'death' end,case when v_dead_names is null then '밤사이 아무 일도 일어나지 않았습니다.' else v_dead_names||' 님이 밤에 사망했습니다.' end);
     if not exists(select 1 from public.players where room_id=p_room_id and alive and role='임프') then
-      update public.rooms set status='finished',winner='good',ended_at=now(),phase_ends_at=null,dawn_message='악마가 사망했습니다. 선량 팀이 승리했습니다.' where id=p_room_id;
+      update public.rooms set status='finished',winner='good',ended_at=now(),phase_ends_at=null,night_ready_at=null,dawn_message='악마가 사망했습니다. 선량 팀이 승리했습니다.' where id=p_room_id;
     elsif v_count<=2 then
-      update public.rooms set status='finished',winner='evil',ended_at=now(),phase_ends_at=null,dawn_message='생존자가 2명이 되었습니다. 악 팀이 승리했습니다.' where id=p_room_id;
+      update public.rooms set status='finished',winner='evil',ended_at=now(),phase_ends_at=null,night_ready_at=null,dawn_message='생존자가 2명이 되었습니다. 악 팀이 승리했습니다.' where id=p_room_id;
     else
-      update public.rooms set status='day',phase_ends_at=now()+make_interval(secs=>v_count*60),dawn_message=case when v_dead_names is null then '밤사이 아무 일도 일어나지 않았습니다.' else '밤사이 '||v_dead_names||' 님이 사망했습니다.' end where id=p_room_id;
+      update public.rooms set status='day',phase_ends_at=now()+make_interval(secs=>v_count*60),night_ready_at=null,dawn_message=case when v_dead_names is null then '밤사이 아무 일도 일어나지 않았습니다.' else '밤사이 '||v_dead_names||' 님이 사망했습니다.' end where id=p_room_id;
     end if;
   else
     if v_room.current_nomination_id is not null then return; end if;
@@ -168,7 +175,7 @@ begin
     end if;
     v_next_day:=v_room.day_number+1;
     insert into public.game_logs(room_id,day_number,phase,event_type,message) values(p_room_id,v_next_day,'night','phase','다음 밤이 시작되었습니다.');
-    update public.rooms set status='night',day_number=v_next_day,phase_ends_at=now()+make_interval(secs=>v_count*30),dawn_message=null,current_nomination_id=null,execution_candidate_id=null,execution_candidate_votes=0,execution_tied=false where id=p_room_id;
+    update public.rooms set status='night',day_number=v_next_day,phase_ends_at=now()+make_interval(secs=>v_count*30),night_ready_at=null,dawn_message=null,current_nomination_id=null,execution_candidate_id=null,execution_candidate_votes=0,execution_tied=false where id=p_room_id;
   end if;
 end $$;
 
@@ -183,6 +190,8 @@ begin
   if v_actor.id is null or not v_actor.alive or v_actor.is_storyteller then raise exception '살아있는 플레이어만 고발할 수 있습니다.'; end if;
   if not exists(select 1 from public.players where id=p_target_id and room_id=p_room_id and alive and not is_storyteller) then raise exception '살아있는 대상을 찾을 수 없습니다.'; end if;
   insert into public.nominations(room_id,day_number,nominator_player_id,target_player_id) values(p_room_id,v_room.day_number,v_actor.id,p_target_id) returning id into v_id;
+  insert into public.nomination_votes(nomination_id,voter_player_id,user_id,vote_choice)
+    select v_id,id,null,(random()<0.5) from public.players where room_id=p_room_id and is_ai and alive;
   update public.rooms set current_nomination_id=v_id where id=p_room_id; return v_id;
 exception when unique_violation then raise exception '오늘 이미 고발했거나, 대상이 이미 고발당했습니다.';
 end $$;
@@ -190,7 +199,7 @@ end $$;
 drop function if exists public.cast_nomination_vote(uuid);
 create or replace function public.cast_nomination_vote(p_nomination_id uuid,p_vote boolean)
 returns void language plpgsql security definer set search_path='' as $$
-declare v_nom public.nominations%rowtype; v_voter public.players%rowtype;
+declare v_nom public.nominations%rowtype; v_voter public.players%rowtype; v_rejects int; v_alive int;
 begin
   select * into v_nom from public.nominations where id=p_nomination_id for update;
   select * into v_voter from public.players where room_id=v_nom.room_id and user_id=(select auth.uid()) for update;
@@ -199,6 +208,14 @@ begin
   if not v_voter.alive and v_voter.ghost_vote_used then raise exception '유령 표를 이미 사용했습니다.'; end if;
   insert into public.nomination_votes(nomination_id,voter_player_id,user_id,vote_choice) values(v_nom.id,v_voter.id,(select auth.uid()),p_vote);
   if p_vote and not v_voter.alive then update public.players set ghost_vote_used=true where id=v_voter.id; end if;
+  if not p_vote then
+    select count(*) into v_rejects from public.nomination_votes where nomination_id=v_nom.id and not vote_choice;
+    select count(*) into v_alive from public.players where room_id=v_nom.room_id and alive and not is_storyteller;
+    if v_rejects>v_alive/2 then
+      update public.nominations set status='closed',votes_count=(select count(*) from public.nomination_votes where nomination_id=v_nom.id and vote_choice) where id=v_nom.id;
+      update public.rooms set current_nomination_id=null where id=v_nom.room_id and current_nomination_id=v_nom.id;
+    end if;
+  end if;
 exception when unique_violation then raise exception '이번 재판에 이미 투표했습니다.';
 end $$;
 
@@ -268,6 +285,19 @@ begin
   update public.players set role=null,alive=true,ghost_vote_used=false,is_storyteller=(v_mode='storyteller' and user_id=(select host_id from public.rooms where id=p_room_id)) where room_id=p_room_id;
   update public.rooms set status='lobby',day_number=1,winner=null,ended_at=null,phase_ends_at=null,dawn_message=null,current_nomination_id=null,execution_candidate_id=null,execution_candidate_votes=0,execution_tied=false,nomination_target_id=null where id=p_room_id;
 end $$;
+
+create or replace function public.add_test_bots(p_room_id uuid)
+returns void language plpgsql security definer set search_path='' as $$
+declare v_humans int; v_bots int; v_seat int;
+begin
+  if not exists(select 1 from public.rooms where id=p_room_id and host_id=(select auth.uid()) and game_mode='auto' and status='lobby') then raise exception '자동 모드 대기실의 방장만 AI를 추가할 수 있습니다.'; end if;
+  select count(*) into v_humans from public.players where room_id=p_room_id and not is_storyteller and not is_ai;
+  select count(*) into v_bots from public.players where room_id=p_room_id and is_ai;
+  if v_humans<>3 or v_bots>0 then return; end if;
+  select coalesce(max(seat_number),0) into v_seat from public.players where room_id=p_room_id;
+  insert into public.players(room_id,user_id,nickname,seat_number,is_storyteller,is_ai) values
+    (p_room_id,null,'AI 하나',v_seat+1,false,true),(p_room_id,null,'AI 둘',v_seat+2,false,true);
+end $$;
 revoke all on function public.shorten_auto_phase(uuid) from public;
 revoke all on function public.advance_auto_phase(uuid) from public;
 revoke all on function public.start_nomination(uuid,uuid) from public;
@@ -276,7 +306,8 @@ revoke all on function public.resolve_nomination(uuid) from public;
 revoke all on function public.submit_night_action(uuid,uuid) from public;
 revoke all on function public.record_game_start(uuid) from public;
 revoke all on function public.restart_game(uuid) from public;
-grant execute on function public.shorten_auto_phase(uuid),public.advance_auto_phase(uuid),public.start_nomination(uuid,uuid),public.cast_nomination_vote(uuid,boolean),public.resolve_nomination(uuid),public.submit_night_action(uuid,uuid),public.record_game_start(uuid),public.restart_game(uuid) to authenticated;
+revoke all on function public.add_test_bots(uuid) from public;
+grant execute on function public.shorten_auto_phase(uuid),public.advance_auto_phase(uuid),public.start_nomination(uuid,uuid),public.cast_nomination_vote(uuid,boolean),public.resolve_nomination(uuid),public.submit_night_action(uuid,uuid),public.record_game_start(uuid),public.restart_game(uuid),public.add_test_bots(uuid) to authenticated;
 do $$ begin
   if not exists(select 1 from pg_publication_tables where pubname='supabase_realtime' and schemaname='public' and tablename='rooms') then alter publication supabase_realtime add table public.rooms; end if;
   if not exists(select 1 from pg_publication_tables where pubname='supabase_realtime' and schemaname='public' and tablename='players') then alter publication supabase_realtime add table public.players; end if;
