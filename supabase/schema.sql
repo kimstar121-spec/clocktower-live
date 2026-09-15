@@ -3,7 +3,6 @@ alter table public.rooms add column if not exists created_at timestamptz not nul
 alter table public.players add column if not exists user_id uuid;
 alter table public.players add column if not exists role text;
 alter table public.players add column if not exists alive boolean not null default true;
-alter table public.players add column if not exists seat int not null default 1;
 alter table public.players add column if not exists created_at timestamptz not null default now();
 alter table public.actions add column if not exists user_id uuid;
 alter table public.actions add column if not exists day_number int not null default 1;
@@ -12,7 +11,7 @@ alter table public.actions add column if not exists target_id uuid;
 alter table public.actions add column if not exists submitted boolean not null default false;
 alter table public.actions add column if not exists created_at timestamptz not null default now();
 create unique index if not exists players_room_user_key on public.players(room_id,user_id);
-create unique index if not exists actions_room_player_day_key on public.actions(room_id,player_id,day_number);
+create unique index if not exists actions_room_player_day_key on public.actions(room_id,actor_player_id,day_number);
 alter table public.rooms enable row level security; alter table public.players enable row level security; alter table public.actions enable row level security; alter table public.game_events enable row level security;
 drop policy if exists "rooms read" on public.rooms; create policy "rooms read" on public.rooms for select to authenticated using(true);
 drop policy if exists "rooms create" on public.rooms; create policy "rooms create" on public.rooms for insert to authenticated with check(host_id=(select auth.uid()));
@@ -25,9 +24,9 @@ drop policy if exists "actions write" on public.actions; create policy "actions 
 drop policy if exists "actions change" on public.actions; create policy "actions change" on public.actions for update to authenticated using(user_id=(select auth.uid())) with check(user_id=(select auth.uid()));
 grant select,insert,update on public.rooms,public.players,public.actions to authenticated;
 create or replace view public.room_players with (security_invoker=true) as
-select p.id,p.room_id,p.user_id,p.name,
+select p.id,p.room_id,p.user_id,p.nickname as name,
   case when p.user_id=(select auth.uid()) or exists(select 1 from public.rooms r where r.id=p.room_id and r.host_id=(select auth.uid())) then p.role else null end as role,
-  p.alive,p.seat
+  p.alive,p.seat_number as seat
 from public.players p;
 grant select on public.room_players to authenticated;
 do $$ begin
