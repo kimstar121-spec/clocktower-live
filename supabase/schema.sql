@@ -8,6 +8,9 @@ alter table public.players add column if not exists role text;
 alter table public.players add column if not exists alive boolean not null default true;
 alter table public.players add column if not exists created_at timestamptz not null default now();
 alter table public.players add column if not exists is_storyteller boolean not null default false;
+alter table public.players add column if not exists position_x real;
+alter table public.players add column if not exists position_y real;
+alter table public.players add column if not exists rmk_role text;
 alter table public.actions add column if not exists user_id uuid;
 alter table public.actions add column if not exists day_number int not null default 1;
 alter table public.actions add column if not exists action_type text;
@@ -35,7 +38,8 @@ grant select,insert,update on public.rooms,public.players,public.actions to auth
 create or replace view public.room_players with (security_invoker=true) as
 select p.id,p.room_id,p.user_id,p.nickname as name,
   case when p.user_id=(select auth.uid()) or exists(select 1 from public.rooms r where r.id=p.room_id and r.host_id=(select auth.uid()) and r.game_mode='storyteller') then p.role else null end as role,
-  p.alive,p.seat_number as seat,p.is_storyteller
+  p.alive,p.seat_number as seat,p.is_storyteller,p.position_x,p.position_y,
+  case when exists(select 1 from public.rooms r where r.id=p.room_id and r.host_id=(select auth.uid())) then p.rmk_role else null end as rmk_role
 from public.players p;
 grant select on public.room_players to authenticated;
 do $$ begin
